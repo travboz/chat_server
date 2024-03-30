@@ -1,6 +1,7 @@
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::TcpListener,
+    sync::broadcast,
 };
 
 #[tokio::main]
@@ -8,9 +9,14 @@ async fn main() {
     // this is our server address - clients connect to this
     let listener = TcpListener::bind("localhost:8080").await.unwrap();
 
+    let (tx, _rx) = broadcast::channel(10);
+
     loop {
         // we accept a new connection at `socket`
-        let (mut socket, _) = listener.accept().await.unwrap();
+        let (mut socket, addr) = listener.accept().await.unwrap();
+
+        let tx = tx.clone();
+        let mut rx = tx.subscribe();
 
         // spawns a new async task
         tokio::spawn(async move {
@@ -24,16 +30,24 @@ async fn main() {
             // main loop for getting input, reading it into our buffer `reader`
             // and then outputting it
             loop {
-                // read_line doesn't clear out the buffer, it just appends onto `line`.
-                let bytes_read = reader.read_line(&mut line).await.unwrap();
+                tokio::select! {
+                    result = reader.read_line(&mut line) => {
+                        if result.unwrap() == 0 {
+                            break;
+                        }
 
-                // no bytes have been sent, so just quit
-                if bytes_read == 0 {
-                    break;
+                        // sending items to everything consumer (client)
+                        tx.send((line.clone(), addr)).unwrap();
+                        line.clear(); // clearing out or removing all the data in `line`
+                    }
+                    result = rx.recv() => {
+                        let (msg, other_addr) = result.unwrap();
+
+                        if addr != other_addr {
+                            writer.write_all(msg.as_bytes()).await.unwrap();
+                        }
+                    }
                 }
-
-                writer.write_all(line.as_bytes()).await.unwrap();
-                line.clear(); // clearing out or removing all the data in `line`
             }
         });
     }
